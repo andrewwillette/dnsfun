@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -35,6 +36,23 @@ var (
 	errLabel     = errorStyle.Render("Error Messages:")
 )
 
+type cnameResult struct {
+	IPAddress string
+	Hostname  string
+}
+
+func (i cnameResult) Title() string {
+	return "ugh title"
+	// return i.IPAddress
+}
+func (i cnameResult) Description() string {
+	return "ugh descp"
+	// return i.Hostname
+}
+func (i cnameResult) FilterValue() string {
+	return "A record baby"
+}
+
 func main() {
 	p := tea.NewProgram(initialModel())
 	_, err := p.Run()
@@ -48,10 +66,11 @@ type (
 )
 
 type model struct {
-	textInput textinput.Model
-	arecord   string
-	cnames    []string
-	errMsg    string
+	textInput   textinput.Model
+	displayList list.Model
+	arecords    []cnameResult
+	cnames      []string
+	errMsg      string
 }
 
 func (m model) Init() tea.Cmd {
@@ -67,44 +86,82 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlC:
 			return m, tea.Quit
 		case tea.KeyEnter:
-			arecord, err := getDnsARecord(m.textInput.Value())
+			arecords, err := getDnsARecord(m.textInput.Value())
 			var errMsg strings.Builder
 			if err != nil {
 				errMsg.WriteString(fmt.Sprintf("%s\n", err.Error()))
 			}
-			cnames, err := getDnsCNames(m.textInput.Value())
-			if err != nil {
-				errMsg.WriteString(fmt.Sprintf("%s\n", err.Error()))
+			// cnames, err := getDnsCNames(m.textInput.Value())
+			// if err != nil {
+			// 	errMsg.WriteString(fmt.Sprintf("%s\n", err.Error()))
+			// }
+			m.arecords = arecords
+
+			var items []list.Item
+			for _, arecord := range m.arecords {
+				items = append(items, arecord)
 			}
-			m.arecord = arecord
-			m.cnames = cnames
+			displayList := list.New(items, list.NewDefaultDelegate(), 0, 0)
+			displayList.SetFilteringEnabled(false)
+			m.displayList = displayList
+			// m.cnames = cnames
 			m.errMsg = errMsg.String()
-			return m, nil
+
+			m.displayList, cmd = m.displayList.Update(msg)
+			// displayList.FilterInput.Focus()
+			return m, cmd
 		}
 	}
+	var cmds []tea.Cmd
 	m.textInput, cmd = m.textInput.Update(msg)
-	return m, cmd
+	cmds = append(cmds, cmd)
+	m.displayList, cmd = m.displayList.Update(msg)
+	cmds = append(cmds, cmd)
+	return m, tea.Batch(cmds...)
 }
 
 // View renders the UI
 func (m model) View() string {
+	// logger.Debug().Msg(fmt.Sprintf("%+v", items))
 	if m.errMsg != "" {
-		return fmt.Sprintf("%s\n%s\n\n%s\n%s\n%s\n%s\n%s\n%s",
+		logger.Error().Msg(m.errMsg)
+		return fmt.Sprintf("%s\n%s\n\n%s\n%s\n%s\n%s",
 			domainPrompt,
 			m.textInput.View(),
 			aRecordLabel,
-			m.arecord,
-			cnamesLabel,
-			m.cnames,
+			m.displayList.View(),
+			// cnamesLabel,
+			// m.cnames,
 			errLabel,
 			strings.TrimRight(m.errMsg, "\n"),
 		)
 	}
-	return fmt.Sprintf("%s\n%s\n\n%s\n%s\n%s\n%s",
+	// arecordsSb := strings.Builder{}
+	// for _, arecord := range m.arecords {
+	// 	arecordsSb.WriteString(fmt.Sprintf("%s\n", arecord.IPAddress))
+	// }
+	if len(m.arecords) > 0 {
+		logger.Debug().Msg(fmt.Sprintf("height: %+v", m.displayList.Height()))
+		// displayList.SetHeight(10)
+		return fmt.Sprintf("%s\n%s\n\n%s\n%v\n%s\n%s",
+			domainPrompt,
+			m.textInput.View(),
+			aRecordLabel,
+			m.displayList.View(),
+			cnamesLabel,
+			m.cnames,
+		)
+	}
+	// return fmt.Sprintf("%s%s%s",
+	// 	domainPrompt,
+	// 	m.textInput.View(),
+	// 	m.displayList.View(),
+	// )
+	return fmt.Sprintf("%s\n%s\n\n%s\n%v\n%s\n%s",
 		domainPrompt,
 		m.textInput.View(),
 		aRecordLabel,
-		m.arecord,
+		m.displayList.View(),
 		cnamesLabel,
 		m.cnames,
 	)
@@ -118,9 +175,11 @@ func initialModel() model {
 	ti.Width = 30
 
 	return model{
-		textInput: ti,
-		arecord:   "",
-		errMsg:    "",
+		textInput:   ti,
+		arecords:    []cnameResult{},
+		errMsg:      "",
+		cnames:      []string{},
+		displayList: list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0),
 	}
 }
 
@@ -140,25 +199,27 @@ func configureLogger() func() error {
 }
 
 // getDnsARecord return the A Record for a given domain
-func getDnsARecord(domain string) (string, error) {
+func getDnsARecord(domain string) ([]cnameResult, error) {
 	var msg dns.Msg
 	fqdn := dns.Fqdn(domain)
 	msg.SetQuestion(fqdn, dns.TypeA)
 	msgResp, err := dns.Exchange(&msg, googleDNSServer)
 	if err != nil {
-		return "", err
+		return []cnameResult{}, err
 	}
 	if len(msgResp.Answer) < 1 {
-		return "", errors.New("no DNS A record returned")
+		return []cnameResult{}, errors.New("no A record returned")
 	}
+	var results []cnameResult
 	for _, answer := range msgResp.Answer {
 		if a, ok := answer.(*dns.A); ok {
-			return a.A.String(), nil
+			results = append(results, cnameResult{fqdn, a.A.String()})
 		}
 	}
-	return "", errors.New("No A record for domain")
+	return results, nil
 }
 
+// getDnsCNames return the CNAMEs for a given domain
 func getDnsCNames(fqdn string) ([]string, error) {
 	var m dns.Msg
 	var fqdns []string
@@ -168,7 +229,7 @@ func getDnsCNames(fqdn string) ([]string, error) {
 		return fqdns, err
 	}
 	if len(in.Answer) < 1 {
-		return fqdns, errors.New("no DNS CName records returned")
+		return fqdns, errors.New("no CName records found")
 	}
 	for _, answer := range in.Answer {
 		if cname, ok := answer.(*dns.CNAME); ok {
@@ -176,4 +237,18 @@ func getDnsCNames(fqdn string) ([]string, error) {
 		}
 	}
 	return fqdns, nil
+}
+
+type empty struct{}
+
+func worker(tracker chan empty, fqdns chan string, gather chan []cnameResult, serverAddr string) {
+	for fqdn := range fqdns {
+		results, err := getDnsARecord(fqdn)
+		if err != nil {
+			logger.Error().Msg(err.Error())
+		}
+		if len(results) > 0 {
+			gather <- results
+		}
+	}
 }
